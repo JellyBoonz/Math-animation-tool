@@ -1,5 +1,6 @@
 import { createSignal, onMount } from "solid-js";
 import { Renderer } from "./renderer/Renderer";
+import { Circle } from "./Circle";
 
 const WIDTH = 800;
 const HEIGHT = 600;
@@ -9,10 +10,13 @@ const ASPECT = WIDTH / HEIGHT;
 export default function Canvas() {
     let canvas!: HTMLCanvasElement;
     let overlay!: HTMLCanvasElement;
+    let t: number = 0;
 
     const [panX, setPanX] = createSignal(0);
     const [panY, setPanY] = createSignal(0);
     const [zoom, setZoom] = createSignal(1);
+    const [playing, setPlaying] = createSignal(false);
+    const [startTime, setStartTime] = createSignal(0);
 
     let isDragging = false;
     let lastMouseX = 0;
@@ -77,6 +81,10 @@ export default function Canvas() {
         let currentSpacing = SPACING;
         let i = 0;
         const sequence = [1, 2, 5];
+
+        const c = new Circle();
+        c.setCenter("0", "sin(t)")
+        
         function loop() {
             
             ctx.clearRect(0, 0, WIDTH, HEIGHT);
@@ -129,7 +137,11 @@ export default function Canvas() {
                 worldBottom += currentSpacing; 
             }
 
-            renderer.frame(panX(), panY(), zoom(), currentSpacing);
+            if(playing() == true) {
+                t = (performance.now() - startTime()) / 1000;
+            }
+
+            renderer.frame(panX(), panY(), zoom(), currentSpacing, [c] , t);
 
             requestAnimationFrame(loop);
         }
@@ -143,13 +155,14 @@ export default function Canvas() {
                 ref={overlay}
                 width={WIDTH}
                 height={HEIGHT}
-                style={{ position: "absolute", top: "0", left: "0" }}
+                style={{ position: "absolute", top: "0", left: "0", background: "transparent"}}
                 onMouseDown={onMouseDown}
                 onMouseMove={onMouseMove}
                 onMouseUp={onMouseUp}
                 onMouseLeave={onMouseUp}
                 onWheel={onWheel}
             />
+            <button onClick={() => {setPlaying(true); setStartTime(performance.now())}}>Play</button>
         </div>
     );
 }

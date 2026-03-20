@@ -1,12 +1,17 @@
+import { Circle } from "../Circle";
+
 export class Renderer {
 
     private canvas: HTMLCanvasElement;
     private device!: GPUDevice;
     private context!: GPUCanvasContext;
     private pipeline!: GPURenderPipeline;
+    private circlePipeline!: GPURenderPipeline;
     private vertexBuffer!: GPUBuffer;
+    private circleBuffer!: GPUBuffer;
     private uniformBuf!: GPUBuffer;
     private bindGroup!: GPUBindGroup;
+    private circleBingGroup!: GPUBindGroup;
     private width!: number;
     private height!: number;
     private spacing!: number;
@@ -65,6 +70,7 @@ export class Renderer {
 
         this.device.queue.writeBuffer(this.vertexBuffer, 0, vertices);
 
+        // Grid Pipeline
         this.pipeline = this.device.createRenderPipeline({
             layout: "auto",
             vertex: {
@@ -114,9 +120,67 @@ export class Renderer {
                 { binding: 0, resource: { buffer: this.uniformBuf } },
             ],
         });
+
+        const circleShaderSource = await fetch("/shaders/circle.wgsl").then(r => r.text());
+        const circleModule = this.device.createShaderModule({ code: circleShaderSource });
+
+        const infoC = await circleModule.getCompilationInfo();
+        for (const msg of info.messages) {
+            console.error(`[shader] ${msg.type}: ${msg.message} (line ${msg.lineNum})`);
+        }
+
+        this.circleBuffer = this.device.createBuffer({
+            size: 280,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
+        })
+
+        this.circlePipeline = this.device.createRenderPipeline({
+            layout: "auto",
+            vertex: {
+                module: circleModule,
+                entryPoint: "vs_circle",
+                buffers: [{
+                    arrayStride: 8,
+                    attributes: [{
+                        shaderLocation: 0,
+                        offset: 0,
+                        format: "float32x2",
+                    }]
+                }]
+            },
+            fragment: {
+                module: circleModule,
+                entryPoint: "fs_circle",
+                targets: [{
+                    format: canvasFormat,
+                    blend: {
+                        color: {
+                            srcFactor: "src-alpha",
+                            dstFactor: "one-minus-src-alpha",
+                            operation: "add"
+                        },
+                        alpha: {
+                            srcFactor: "one",
+                            dstFactor: "one-minus-src-alpha",
+                            operation: "add"
+                        }
+                    }
+                }]
+            }
+        })
+
+        this.circleBingGroup = this.device.createBindGroup({
+            layout: this.circlePipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: { buffer: this.circleBuffer } },
+                { binding: 1, resource: { buffer: this.uniformBuf } }
+            ]
+        })
     }
 
-    public frame(panX: number, panY: number, zoom: number, currentSpacing: number) {
+    public frame(panX: number, panY: number, zoom: number, currentSpacing: number, circles: Circle[], t: number) {
+
+        const textureView = this.context.getCurrentTexture().createView()
         this.device.queue.writeBuffer(
             this.uniformBuf, 0,
             new Float32Array([currentSpacing, zoom, panX, panY, this.width, this.height])
@@ -126,7 +190,7 @@ export class Renderer {
 
         const pass = encoder.beginRenderPass({
             colorAttachments: [{
-                view: this.context.getCurrentTexture().createView(),
+                view: textureView,
                 clearValue: { r: 0.8, g: 0.87, b: 0.98, a: 1 },
                 loadOp: "clear",
                 storeOp: "store"
@@ -139,6 +203,38 @@ export class Renderer {
         pass.draw(6);
         pass.end();
 
+        const data: number[] = [];
+        for (const circle of circles) {
+            const ev = circle.evaluate(t);
+            data.push(ev.x, ev.y, ev.radius, 0, ev.color.r, ev.color.g, ev.color.b, ev.color.a);
+        }
+
+        this.device.queue.writeBuffer(
+            this.circleBuffer, 0,
+            new Float32Array(data)
+        )
+        this.device.pushErrorScope("validation");
+        // ... circle pass code ...                 
+        const circleEncoder = this.device.createCommandEncoder();
+        const circlePass = circleEncoder.beginRenderPass({
+            colorAttachments: [{
+                view: textureView,
+                clearValue: { r: 0.8, g: 0.87, b: 0.98, a: 1 },
+                loadOp: "load",
+                storeOp: "store"
+            }]
+        })
+        circlePass.setPipeline(this.circlePipeline);
+        circlePass.setVertexBuffer(0, this.vertexBuffer);
+        circlePass.setBindGroup(0, this.circleBingGroup);
+        circlePass.draw(6, circles.length);
+        circlePass.end();
+
+        this.device.popErrorScope().then(error => {
+            if (error) console.error("WebGPU error:", error.message);
+        });
+
         this.device.queue.submit([encoder.finish()]);
+        this.device.queue.submit([circleEncoder.finish()]);
     }
 }
