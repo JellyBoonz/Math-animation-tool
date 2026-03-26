@@ -1,15 +1,13 @@
-struct Circle {
-    center: vec2<f32>,
-    radius: f32,
-    padding: f32,
-    color: vec4<f32>,
-}
 struct Uniforms {
     spacing: f32,
     zoom: f32,
     pan: vec2<f32>,
     resolution: vec2<f32>,
 };
+struct CurveUniforms {
+    color: vec4<f32>,
+    radius: f32
+}
 
 struct VertexOut {
     @builtin(position) pos    : vec4<f32>,
@@ -17,14 +15,15 @@ struct VertexOut {
     @location(1) @interpolate(flat) id : u32
 }
 
-@group(0) @binding(0) var<storage, read> circles: array<Circle>;
+@group(0) @binding(0) var<storage, read> positions: array<vec2<f32>>;
 @group(0) @binding(1) var<uniform> uniforms : Uniforms;
+@group(0) @binding(2) var<uniform> curveUniforms: CurveUniforms;
 
 @vertex
-fn vs_circle(@builtin(instance_index) i: u32, @location(0) pos: vec2<f32>) -> VertexOut{
+fn vs_curve(@builtin(instance_index) i: u32, @location(0) pos: vec2<f32>) -> VertexOut{
     var out: VertexOut;
-    let circle = circles[i];
-    let newPos = circle.center + circle.radius * pos;
+    let position = positions[i];
+    let newPos = position + curveUniforms.radius * pos;
 
     let panX = uniforms.pan.x;
     let panY = uniforms.pan.y;
@@ -41,14 +40,15 @@ fn vs_circle(@builtin(instance_index) i: u32, @location(0) pos: vec2<f32>) -> Ve
 }
 
 @fragment
-fn fs_circle(in: VertexOut) -> @location(0) vec4<f32>  {
+fn fs_curve(in: VertexOut) -> @location(0) vec4<f32>  {
 
     if(length(in.uv) < 1.0) {
-        let color = circles[in.id].color.xyz;
+        let color = curveUniforms.color.xyz;
 
-        let bandwidth = 0.1;
+        let bandwidth = 0.08;
         let min = 1 - bandwidth / uniforms.zoom;
         let max = 1.0;
+
         return vec4(color, 1 - smoothstep(min, max, length(in.uv)));
     }
 
