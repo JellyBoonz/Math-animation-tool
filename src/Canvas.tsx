@@ -1,35 +1,94 @@
-import { createSignal, onMount, Show } from "solid-js";
+import { createSignal, onMount, For, Show } from "solid-js";
 import { Renderer } from "./renderer/Renderer";
 import { Circle } from "./Circle";
-import { Point } from "./Point"
 import { ParametricCurve } from "./ParametricCurve";
 
-const WIDTH = 800;
-const HEIGHT = 600;
 const SPACING = 1.0;
-const ASPECT = WIDTH / HEIGHT;
+const PANEL_W = 280;
+const CURVE_COLORS = ["#60a5fa", "#f472b6", "#34d399", "#fbbf24", "#a78bfa", "#f87171", "#38bdf8", "#fb923c"];
+
+type CurveEntry = {
+    id: number;
+    curve: ParametricCurve;
+    xExpr: string;
+    yExpr: string;
+    color: string;
+};
+
+let nextCurveId = 0;
 
 export default function Canvas() {
     let canvas!: HTMLCanvasElement;
     let overlay!: HTMLCanvasElement;
-    let t: number = 0;
+    let renderer!: Renderer;
+    let t = 0;
+    let gpuCurves: ParametricCurve[] = [];
     let circles: Circle[] = [];
+
+    const W = window.innerWidth;
+    const H = window.innerHeight;
+    const ASPECT = W / H;
 
     const [panX, setPanX] = createSignal(0);
     const [panY, setPanY] = createSignal(0);
     const [zoom, setZoom] = createSignal(1);
     const [playing, setPlaying] = createSignal(false);
     const [startTime, setStartTime] = createSignal(0);
+    const [panelOpen, setPanelOpen] = createSignal(true);
+    const [curveEntries, setCurveEntries] = createSignal<CurveEntry[]>([]);
     const [selectedCircle, setSelectedCircle] = createSignal<Circle | null>(null);
     const [selectedColor, setSelectedColor] = createSignal("#3b82f6");
 
-    // Track current input values for center so we can call setCenter(x, y) with both
+    const curveInputs = new Map<number, { x: string; y: string }>();
     let centerXVal = "0";
     let centerYVal = "0";
-
     let isDragging = false;
     let lastMouseX = 0;
     let lastMouseY = 0;
+
+    function hexToColor(hex: string) {
+        return {
+            r: parseInt(hex.slice(1, 3), 16) / 255,
+            g: parseInt(hex.slice(3, 5), 16) / 255,
+            b: parseInt(hex.slice(5, 7), 16) / 255,
+            a: 1
+        };
+    }
+
+    function addCurve(xExpr = "cos(t)", yExpr = "sin(t)") {
+        const id = nextCurveId++;
+        const colorHex = CURVE_COLORS[id % CURVE_COLORS.length];
+
+        const curve = new ParametricCurve();
+        curve.setCenter(xExpr, yExpr);
+        curve.setLength(5000);
+        curve.setColor(hexToColor(colorHex));
+
+        renderer.addCurve(curve);
+        gpuCurves.push(curve);
+        curveInputs.set(id, { x: xExpr, y: yExpr });
+        setCurveEntries(prev => [...prev, { id, curve, xExpr, yExpr, color: colorHex }]);
+    }
+
+    function removeCurve(id: number) {
+        const entry = curveEntries().find(e => e.id === id);
+        if (!entry) return;
+        gpuCurves = gpuCurves.filter(c => c !== entry.curve);
+        curveInputs.delete(id);
+        setCurveEntries(prev => prev.filter(e => e.id !== id));
+    }
+
+    function applyCurveExpr(id: number) {
+        const entry = curveEntries().find(e => e.id === id);
+        const inputs = curveInputs.get(id);
+        if (!entry || !inputs) return;
+        try {
+            entry.curve.setCenter(inputs.x, inputs.y);
+            setCurveEntries(prev => prev.map(e =>
+                e.id === id ? { ...e, xExpr: inputs.x, yExpr: inputs.y } : e
+            ));
+        } catch {}
+    }
 
     function onMouseDown(e: MouseEvent) {
         isDragging = true;
@@ -39,270 +98,338 @@ export default function Canvas() {
 
     function onMouseMove(e: MouseEvent) {
         if (!isDragging) return;
-
         const dx = e.clientX - lastMouseX;
         const dy = e.clientY - lastMouseY;
         lastMouseX = e.clientX;
         lastMouseY = e.clientY;
-
         const z = zoom();
-        setPanX(p => p - dx * 2 * ASPECT / (z * WIDTH));
-        setPanY(p => p + dy * 2 / (z * HEIGHT));
+        setPanX(p => p - dx * 2 * ASPECT / (z * W));
+        setPanY(p => p + dy * 2 / (z * H));
     }
 
-    function onMouseUp() {
-        isDragging = false;
-    }
+    function onMouseUp() { isDragging = false; }
 
     function onWheel(e: WheelEvent) {
         e.preventDefault();
-
-        const rect = canvas.getBoundingClientRect();
-        const uvX = ((e.clientX - rect.left) / WIDTH) * 2 - 1;
-        const uvY = -(((e.clientY - rect.top) / HEIGHT) * 2 - 1);
-
-        const oldZoom = zoom();
-        const newZoom = oldZoom * (e.deltaY < 0 ? 1.1 : 1 / 1.1);
-
-        // Adjust pan so the world point under the cursor stays fixed
-        setPanX(p => p + uvX * ASPECT * (1 / oldZoom - 1 / newZoom));
-        setPanY(p => p + uvY * (1 / oldZoom - 1 / newZoom));
-        setZoom(newZoom);
+        setZoom(z => z * (e.deltaY < 0 ? 1.1 : 1 / 1.1));
     }
 
-    function mod(i: number, n: number) {
-        return ((i % n) + n) % n;
-    }
+    function mod(i: number, n: number) { return ((i % n) + n) % n; }
 
-    function labelGridLines(ctx: CanvasRenderingContext2D, aspect: number, currentSpacing: number) {
-        let worldLeft = (-1 * aspect) / zoom() + panX();
-            const worldRight = (1 * aspect) / zoom() + panX();
-            let worldBottom = -1 / zoom() + panY();
-            const worldTop = 1 / zoom() + panY();
-            const xAxis = 0;
-            while (worldLeft < worldRight) {
-                let leftGridLine = Math.ceil(worldLeft / currentSpacing) * currentSpacing;
+    function labelGridLines(ctx: CanvasRenderingContext2D, currentSpacing: number) {
+        let worldLeft = (-1 * ASPECT) / zoom() + panX();
+        const worldRight = (1 * ASPECT) / zoom() + panX();
+        let worldBottom = -1 / zoom() + panY();
+        const worldTop = 1 / zoom() + panY();
 
-                const lineCoord = (((leftGridLine - panX()) * zoom() / aspect) + 1) * WIDTH / 2;    // worldX to screenX
-                const xAxisCoord = ((0 + panY()) * zoom() + 1) * HEIGHT / 2;                        // worldY to screenY
-                ctx.font = "bold 15px sans-serif";
-                ctx.fillText(leftGridLine.toString(), lineCoord - 15, xAxisCoord + 20);
-                worldLeft += currentSpacing;
-            }
+        ctx.fillStyle = "#1a1a2e";
+        ctx.font = "bold 13px sans-serif";
 
-            while (worldBottom < worldTop) {
-                let bottomGridLine = Math.ceil(worldBottom / currentSpacing) * currentSpacing;
+        while (worldLeft < worldRight) {
+            const leftGridLine = Math.ceil(worldLeft / currentSpacing) * currentSpacing;
+            const lineCoord = (((leftGridLine - panX()) * zoom() / ASPECT) + 1) * W / 2;
+            const xAxisCoord = (panY() * zoom() + 1) * H / 2;
+            ctx.fillText(leftGridLine.toString(), lineCoord - 15, xAxisCoord + 20);
+            worldLeft += currentSpacing;
+        }
 
-                const lineCoord = ((-bottomGridLine + panY()) * zoom() + 1) * HEIGHT / 2;
-                const yAxisCoord = (((0 - panX()) * zoom() / aspect) + 1) * WIDTH / 2;
-                ctx.font = "bold 15px sans-serif";
-                if(bottomGridLine !== 0)
+        while (worldBottom < worldTop) {
+            const bottomGridLine = Math.ceil(worldBottom / currentSpacing) * currentSpacing;
+            const lineCoord = ((-bottomGridLine + panY()) * zoom() + 1) * H / 2;
+            const yAxisCoord = (((0 - panX()) * zoom() / ASPECT) + 1) * W / 2;
+            if (bottomGridLine !== 0)
                 ctx.fillText(bottomGridLine.toString(), yAxisCoord - 40, lineCoord - 3);
-                worldBottom += currentSpacing;
-            }
+            worldBottom += currentSpacing;
+        }
     }
 
-    function adjustGridSpacing(aspect: number, currentSpacing: number, i: number, exponent: number, sequence: number[]) {
+    function adjustGridSpacing(currentSpacing: number, i: number, exponent: number, sequence: number[]) {
         const maxPixelDistance = 300;
         const minPixelDistance = 100;
-        const halfWidth = WIDTH / 2;
-        const zoomOverAspect = zoom() / aspect;
-
-        let pixelSpacing = currentSpacing * halfWidth * zoomOverAspect;
+        const pixelSpacing = currentSpacing * (W / 2) * (zoom() / ASPECT);
 
         if (pixelSpacing > maxPixelDistance) {
             i--;
-            if (mod(i, 3) == 2) {
-                exponent--;
-            }
+            if (mod(i, 3) == 2) exponent--;
             currentSpacing = sequence[mod(i, 3)] * (10 ** exponent);
-        }
-        else if(pixelSpacing < minPixelDistance) {
+        } else if (pixelSpacing < minPixelDistance) {
             i++;
-            if (mod(i, 3) == 0) {
-                exponent++;
-            }
+            if (mod(i, 3) == 0) exponent++;
             currentSpacing = sequence[mod(i, 3)] * (10 ** exponent);
         }
 
-        return {currentSpacing, i, exponent};
+        return { currentSpacing, i, exponent };
     }
 
     onMount(async () => {
-        // wheel must be registered manually to opt out of passive mode,
-        // otherwise preventDefault() has no effect and the page will scroll
-        canvas.addEventListener("wheel", onWheel, { passive: false });
+        overlay.addEventListener("wheel", onWheel, { passive: false });
 
-        const renderer = new Renderer(canvas);
-        await renderer.init(WIDTH, HEIGHT, SPACING);
+        renderer = new Renderer(canvas);
+        await renderer.init(W, H, SPACING);
+
+        addCurve(
+            "0.6 * cos(t) + 0.3 * cos(7 * t / 3)",
+            "0.6 * sin(t) - 0.3 * sin(7 * t / 3)"
+        );
 
         const ctx = overlay.getContext("2d")!;
-        const aspect = WIDTH / HEIGHT;
         let exponent = 0;
         let currentSpacing = SPACING;
-        let i = 0;
+        let seqIdx = 0;
         const sequence = [1, 2, 5];
 
-        const p = new Point();
-        p.setCenter("0", "sin(t)");
-        const points: Point[] = [p];
-
-        const c = new ParametricCurve();
-        c.setCenter("cos(t)", "sin(t)");
-        c.setRadius("0.01")
-        const curves: ParametricCurve[] = [c];
-
-        for(const curve of curves) {
-            renderer.addCurve(curve);
-        }
-
         function loop() {
-
-            ctx.clearRect(0, 0, WIDTH, HEIGHT);
-
-            ({currentSpacing, i, exponent} = adjustGridSpacing(aspect, currentSpacing, i, exponent, sequence));
-
-            labelGridLines(ctx, aspect, currentSpacing);
-
-            if(playing() == true) {
-                t = (performance.now() - startTime()) / 1000;
-            }
-
-            renderer.frame(panX(), panY(), zoom(), currentSpacing, circles, points, curves, t);
-
+            ctx.clearRect(0, 0, W, H);
+            ({ currentSpacing, i: seqIdx, exponent } = adjustGridSpacing(currentSpacing, seqIdx, exponent, sequence));
+            labelGridLines(ctx, currentSpacing);
+            if (playing()) t = (performance.now() - startTime()) / 1000;
+            renderer.frame(panX(), panY(), zoom(), currentSpacing, circles, [], gpuCurves, t);
             requestAnimationFrame(loop);
         }
         requestAnimationFrame(loop);
     });
 
-    const panelStyle = {
-        display: "flex",
-        "flex-direction": "column" as const,
-        gap: "0px",
-        width: "260px",
-        "font-family": "system-ui, sans-serif",
-        "font-size": "13px",
-        color: "#1a1a1a",
-    };
-
-    const btnStyle = (primary: boolean) => ({
-        padding: "8px 12px",
-        border: "none",
-        "border-radius": "6px",
-        cursor: "pointer",
-        "font-size": "13px",
-        "font-weight": "500",
-        background: primary ? "#3b82f6" : "#f1f5f9",
-        color: primary ? "#fff" : "#334155",
-        transition: "opacity 0.15s",
-    });
-
-    const inputStyle = {
+    // Styles
+    const darkInput = {
         padding: "6px 10px",
-        border: "1px solid #e2e8f0",
+        border: "1px solid rgba(255,255,255,0.1)",
         "border-radius": "6px",
-        "font-size": "13px",
+        "font-size": "12px",
         "font-family": "monospace",
         outline: "none",
-        background: "#f8fafc",
-        color: "#1a1a1a",
+        background: "rgba(255,255,255,0.06)",
+        color: "#e2e8f0",
         width: "100%",
         "box-sizing": "border-box" as const,
     };
 
-    const labelStyle = {
+    const fieldLabel = {
         "font-size": "11px",
-        "font-weight": "600",
-        "text-transform": "uppercase" as const,
-        "letter-spacing": "0.05em",
-        color: "#64748b",
-        "margin-bottom": "2px",
+        "font-weight": "500" as const,
+        color: "rgba(255,255,255,0.45)",
+        "margin-bottom": "3px",
     };
 
+    const sectionLabel = {
+        "font-size": "10px",
+        "font-weight": "700" as const,
+        "text-transform": "uppercase" as const,
+        "letter-spacing": "0.1em",
+        color: "rgba(255,255,255,0.3)",
+        "margin-bottom": "8px",
+    };
+
+    const btn = (accent: string, textColor: string) => ({
+        border: "none",
+        "border-radius": "6px",
+        cursor: "pointer",
+        "font-size": "12px",
+        "font-weight": "500" as const,
+        background: accent,
+        color: textColor,
+        transition: "opacity 0.15s",
+    });
+
     return (
-        <div style={{ display: "flex", gap: "0px", height: "100vh", background: "#f8fafc", "font-family": "system-ui, sans-serif" }}>
-            <div style={{ position: "relative", width: `${WIDTH}px`, height: `${HEIGHT}px`, "flex-shrink": "0", "box-shadow": "2px 0 8px rgba(0,0,0,0.06)" }}>
-                <canvas ref={canvas} width={WIDTH} height={HEIGHT} />
-                <canvas
-                    ref={overlay}
-                    width={WIDTH}
-                    height={HEIGHT}
-                    style={{ position: "absolute", top: "0", left: "0", background: "transparent" }}
-                    onMouseDown={onMouseDown}
-                    onMouseMove={onMouseMove}
-                    onMouseUp={onMouseUp}
-                    onMouseLeave={onMouseUp}
-                    onWheel={onWheel}
-                />
-            </div>
+        <div style={{ position: "relative", width: "100vw", height: "100vh", overflow: "hidden" }}>
+            <canvas ref={canvas} width={W} height={H} style={{ position: "absolute", top: "0", left: "0" }} />
+            <canvas
+                ref={overlay}
+                width={W}
+                height={H}
+                style={{ position: "absolute", top: "0", left: "0", background: "transparent" }}
+                onMouseDown={onMouseDown}
+                onMouseMove={onMouseMove}
+                onMouseUp={onMouseUp}
+                onMouseLeave={onMouseUp}
+            />
 
-            <div style={{ ...panelStyle, padding: "16px", "overflow-y": "auto", "flex-grow": "1", "max-width": "280px", background: "#fff", "border-left": "1px solid #e2e8f0" }}>
-                <div style={{ "font-size": "15px", "font-weight": "600", "margin-bottom": "16px", color: "#0f172a" }}>Math Viz</div>
+            {/* Panel toggle */}
+            <button
+                style={{
+                    position: "absolute",
+                    top: "12px",
+                    left: panelOpen() ? `${PANEL_W + 12}px` : "12px",
+                    "z-index": "20",
+                    width: "34px",
+                    height: "34px",
+                    background: "rgba(8,12,24,0.85)",
+                    "backdrop-filter": "blur(8px)",
+                    border: "1px solid rgba(255,255,255,0.12)",
+                    "border-radius": "8px",
+                    cursor: "pointer",
+                    color: "#94a3b8",
+                    "font-size": "15px",
+                    transition: "left 0.2s ease",
+                    display: "flex",
+                    "align-items": "center",
+                    "justify-content": "center",
+                    padding: "0",
+                }}
+                onClick={() => setPanelOpen(o => !o)}
+            >
+                {panelOpen() ? "✕" : "☰"}
+            </button>
 
-                <div style={{ display: "flex", gap: "8px", "margin-bottom": "16px" }}>
-                    <button style={btnStyle(true)} onClick={() => { setPlaying(true); setStartTime(performance.now() - t * 1000); }}>▶ Play</button>
-                    <button style={btnStyle(true)} onClick={() => { setPlaying(false); setStartTime(startTime()); }}>⏸︎ Pause</button>
-                    <button style={btnStyle(false)} onClick={() => {
+            {/* Side panel */}
+            <div style={{
+                position: "absolute",
+                top: "0",
+                left: panelOpen() ? "0" : `-${PANEL_W}px`,
+                width: `${PANEL_W}px`,
+                height: "100%",
+                background: "rgba(8,12,24,0.88)",
+                "backdrop-filter": "blur(16px)",
+                "border-right": "1px solid rgba(255,255,255,0.07)",
+                transition: "left 0.2s ease",
+                "overflow-y": "auto",
+                "z-index": "10",
+                padding: "16px",
+                "box-sizing": "border-box" as const,
+                color: "#e2e8f0",
+                "font-family": "system-ui, sans-serif",
+                "font-size": "13px",
+            }}>
+                <div style={{ "font-size": "15px", "font-weight": "700", "margin-bottom": "20px", color: "#f1f5f9" }}>
+                    Math Viz
+                </div>
+
+                {/* Playback */}
+                <div style={{ display: "flex", gap: "6px", "margin-bottom": "24px" }}>
+                    <button
+                        style={{ ...btn("#3b82f6", "#fff"), padding: "7px 0", flex: "1" }}
+                        onClick={() => { setPlaying(true); setStartTime(performance.now() - t * 1000); }}
+                    >▶ Play</button>
+                    <button
+                        style={{ ...btn("rgba(255,255,255,0.08)", "#94a3b8"), padding: "7px 0", flex: "1" }}
+                        onClick={() => setPlaying(false)}
+                    >⏸ Pause</button>
+                </div>
+
+                {/* Curves */}
+                <div style={sectionLabel}>Curves</div>
+                <button
+                    style={{ ...btn("transparent", "#64748b"), padding: "7px 12px", width: "100%", "margin-bottom": "10px", border: "1px dashed rgba(255,255,255,0.1)" }}
+                    onClick={() => addCurve()}
+                >+ Add Curve</button>
+
+                <For each={curveEntries()}>
+                    {(entry) => (
+                        <div style={{
+                            background: "rgba(255,255,255,0.03)",
+                            border: "1px solid rgba(255,255,255,0.07)",
+                            "border-radius": "8px",
+                            padding: "12px",
+                            "margin-bottom": "8px",
+                        }}>
+                            <div style={{ display: "flex", "justify-content": "space-between", "align-items": "center", "margin-bottom": "10px" }}>
+                                <div style={{ display: "flex", "align-items": "center", gap: "7px" }}>
+                                    <div style={{ width: "8px", height: "8px", "border-radius": "50%", background: entry.color, "flex-shrink": "0" }} />
+                                    <span style={{ "font-weight": "600", "font-size": "12px", color: "#cbd5e1" }}>Curve {entry.id + 1}</span>
+                                </div>
+                                <button
+                                    style={{ ...btn("rgba(239,68,68,0.12)", "#f87171"), padding: "2px 7px", "font-size": "11px" }}
+                                    onClick={() => removeCurve(entry.id)}
+                                >✕</button>
+                            </div>
+
+                            <div style={{ "margin-bottom": "8px" }}>
+                                <div style={fieldLabel}>x(t)</div>
+                                <input
+                                    style={darkInput}
+                                    value={entry.xExpr}
+                                    onInput={e => { curveInputs.get(entry.id)!.x = e.currentTarget.value; }}
+                                    onKeyDown={e => { if (e.key === "Enter") applyCurveExpr(entry.id); }}
+                                />
+                            </div>
+
+                            <div style={{ "margin-bottom": "8px" }}>
+                                <div style={fieldLabel}>y(t)</div>
+                                <input
+                                    style={darkInput}
+                                    value={entry.yExpr}
+                                    onInput={e => { curveInputs.get(entry.id)!.y = e.currentTarget.value; }}
+                                    onKeyDown={e => { if (e.key === "Enter") applyCurveExpr(entry.id); }}
+                                />
+                            </div>
+
+                            <div>
+                                <div style={fieldLabel}>Color</div>
+                                <input
+                                    type="color"
+                                    value={entry.color}
+                                    style={{ width: "100%", height: "28px", border: "1px solid rgba(255,255,255,0.1)", "border-radius": "6px", cursor: "pointer", padding: "2px", background: "transparent" }}
+                                    onInput={e => {
+                                        const hex = e.currentTarget.value;
+                                        entry.curve.setColor(hexToColor(hex));
+                                        setCurveEntries(prev => prev.map(en => en.id === entry.id ? { ...en, color: hex } : en));
+                                    }}
+                                />
+                            </div>
+                        </div>
+                    )}
+                </For>
+
+                <div style={{ "border-top": "1px solid rgba(255,255,255,0.06)", margin: "16px 0" }} />
+
+                {/* Circles */}
+                <div style={sectionLabel}>Circles</div>
+                <button
+                    style={{ ...btn("transparent", "#64748b"), padding: "7px 12px", width: "100%", "margin-bottom": "10px", border: "1px dashed rgba(255,255,255,0.1)" }}
+                    onClick={() => {
                         const c = new Circle();
                         circles.push(c);
                         setSelectedCircle(c);
                         setSelectedColor("#3b82f6");
-                    }}>+ Circle</button>
-                </div>
+                    }}
+                >+ Add Circle</button>
 
                 <Show when={selectedCircle() !== null}>
-                    <div style={{ "border-radius": "8px", border: "1px solid #e2e8f0", overflow: "hidden" }}>
-                        <div style={{ padding: "10px 12px", background: "#f1f5f9", "border-bottom": "1px solid #e2e8f0", "font-weight": "600", "font-size": "12px", color: "#475569", display: "flex", "align-items": "center", gap: "6px" }}>
-                            <span style={{ display: "inline-block", width: "10px", height: "10px", "border-radius": "50%", background: selectedColor() }} />
-                            Circle
+                    <div style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.07)", "border-radius": "8px", padding: "12px", display: "flex", "flex-direction": "column", gap: "8px" }}>
+                        <div>
+                            <div style={fieldLabel}>Center X</div>
+                            <input style={darkInput} placeholder="0"
+                                onKeyDown={e => {
+                                    if (e.key === "Enter") {
+                                        centerXVal = e.currentTarget.value;
+                                        try { selectedCircle()!.setCenter(centerXVal, centerYVal); } catch {}
+                                    }
+                                }}
+                            />
                         </div>
-                        <div style={{ padding: "12px", display: "flex", "flex-direction": "column", gap: "10px" }}>
-                            <div>
-                                <div style={labelStyle}>Center X</div>
-                                <input style={inputStyle} placeholder="0"
-                                    onKeyDown={e => {
-                                        if (e.key === "Enter") {
-                                            centerXVal = e.currentTarget.value;
-                                            try { selectedCircle()!.setCenter(centerXVal, centerYVal); } catch {}
-                                        }
-                                    }}
-                                />
-                            </div>
-                            <div>
-                                <div style={labelStyle}>Center Y</div>
-                                <input style={inputStyle} placeholder="0"
-                                    onKeyDown={e => {
-                                        if (e.key === "Enter") {
-                                            centerYVal = e.currentTarget.value;
-                                            try { selectedCircle()!.setCenter(centerXVal, centerYVal); } catch {}
-                                        }
-                                    }}
-                                />
-                            </div>
-                            <div>
-                                <div style={labelStyle}>Radius</div>
-                                <input style={inputStyle} placeholder="1"
-                                    onKeyDown={e => {
-                                        if (e.key === "Enter") {
-                                            try { selectedCircle()!.setRadius(e.currentTarget.value); } catch {}
-                                        }
-                                    }}
-                                />
-                            </div>
-                            <div>
-                                <div style={labelStyle}>Color</div>
-                                <input type="color" value={selectedColor()}
-                                    style={{ width: "100%", height: "32px", border: "1px solid #e2e8f0", "border-radius": "6px", cursor: "pointer", padding: "2px" }}
-                                    onInput={e => {
-                                        const hex = e.currentTarget.value;
-                                        setSelectedColor(hex);
-                                        const r = parseInt(hex.slice(1, 3), 16) / 255;
-                                        const g = parseInt(hex.slice(3, 5), 16) / 255;
-                                        const b = parseInt(hex.slice(5, 7), 16) / 255;
-                                        selectedCircle()!.setColor({ r, g, b, a: 1 });
-                                    }}
-                                />
-                            </div>
+                        <div>
+                            <div style={fieldLabel}>Center Y</div>
+                            <input style={darkInput} placeholder="0"
+                                onKeyDown={e => {
+                                    if (e.key === "Enter") {
+                                        centerYVal = e.currentTarget.value;
+                                        try { selectedCircle()!.setCenter(centerXVal, centerYVal); } catch {}
+                                    }
+                                }}
+                            />
+                        </div>
+                        <div>
+                            <div style={fieldLabel}>Radius</div>
+                            <input style={darkInput} placeholder="1"
+                                onKeyDown={e => {
+                                    if (e.key === "Enter") {
+                                        try { selectedCircle()!.setRadius(e.currentTarget.value); } catch {}
+                                    }
+                                }}
+                            />
+                        </div>
+                        <div>
+                            <div style={fieldLabel}>Color</div>
+                            <input
+                                type="color"
+                                value={selectedColor()}
+                                style={{ width: "100%", height: "28px", border: "1px solid rgba(255,255,255,0.1)", "border-radius": "6px", cursor: "pointer", padding: "2px", background: "transparent" }}
+                                onInput={e => {
+                                    const hex = e.currentTarget.value;
+                                    setSelectedColor(hex);
+                                    selectedCircle()!.setColor(hexToColor(hex));
+                                }}
+                            />
                         </div>
                     </div>
                 </Show>

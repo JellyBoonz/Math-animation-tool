@@ -6,13 +6,15 @@ struct Uniforms {
 };
 struct CurveUniforms {
     color: vec4<f32>,
-    radius: f32
+    radius: f32,
+    count: u32,
+    head: u32,
+    length: u32
 }
 
 struct VertexOut {
     @builtin(position) pos    : vec4<f32>,
-    @location(0)       uv     : vec2<f32>,
-    @location(1) @interpolate(flat) id : u32
+    @location(0) v: f32,
 }
 
 @group(0) @binding(0) var<storage, read> positions: array<vec2<f32>>;
@@ -20,37 +22,38 @@ struct VertexOut {
 @group(0) @binding(2) var<uniform> curveUniforms: CurveUniforms;
 
 @vertex
-fn vs_curve(@builtin(instance_index) i: u32, @location(0) pos: vec2<f32>) -> VertexOut{
+fn vs_curve(@builtin(vertex_index) i: u32) -> VertexOut {
     var out: VertexOut;
     let position = positions[i];
-    let newPos = position + curveUniforms.radius * pos;
 
     let panX = uniforms.pan.x;
     let panY = uniforms.pan.y;
     let aspect = uniforms.resolution.x / uniforms.resolution.y;
 
-    let clipPosX = ((newPos.x - panX) * uniforms.zoom / aspect);
-    let clipPosY = (newPos.y - panY) * uniforms.zoom;
+    let clipPosX = ((position.x - panX) * uniforms.zoom / aspect);
+    let clipPosY = (position.y - panY) * uniforms.zoom;
 
     out.pos = vec4(clipPosX, clipPosY, 0, 1);
-    out.uv = pos;
-    out.id = i;
-
+    out.v = f32(i % 2u) * 2.0 - 1.0;
+    
     return out;
 }
 
 @fragment
 fn fs_curve(in: VertexOut) -> @location(0) vec4<f32>  {
 
-    if(length(in.uv) < 1.0) {
-        let color = curveUniforms.color.xyz;
+    // if(length(in.uv) < 1.0) {
+    //     let color = curveUniforms.color.xyz;
 
-        let bandwidth = 0.08;
-        let min = 1 - bandwidth / uniforms.zoom;
-        let max = 1.0;
+    //     let bandwidth = 0.08;
+    //     let min = 1 - bandwidth / uniforms.zoom;
+    //     let max = 1.0;
 
-        return vec4(color, 1 - smoothstep(min, max, length(in.uv)));
-    }
+    //     return vec4(color, 1 - smoothstep(min, max, length(in.uv)));
+    // }
 
-    return vec4(1, 0, 0, 0);
+    // return vec4(1, 0, 0, 0);
+
+    let alpha = 1.0 - smoothstep(0.3 / uniforms.zoom, 1.0, abs(in.v));   
+    return vec4(curveUniforms.color.xyz, alpha);
 }

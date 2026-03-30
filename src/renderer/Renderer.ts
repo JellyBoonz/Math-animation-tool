@@ -27,6 +27,7 @@ export class Renderer {
     private circleBingGroup!: GPUBindGroup;
     private pointBindGroup!: GPUBindGroup;
     private curveBindGroups: Map<ParametricCurve, GPUBindGroup> = new Map();
+    private computeBindGroups: Map<ParametricCurve, GPUBindGroup> = new Map();
 
     private width!: number;
     private height!: number;
@@ -222,20 +223,25 @@ export class Renderer {
         const shaderSource = await fetch("/shaders/curve.wgsl").then(r => r.text());
         const module = this.device.createShaderModule({ code: shaderSource });
 
+        const computeSource = await fetch("/shaders/curve_compute.wgsl").then(r => r.text());
+        const computeModule = this.device.createShaderModule({ code: computeSource });
+
         const info = await module.getCompilationInfo();
         for (const msg of info.messages) {
             console.error(`[shader] ${msg.type}: ${msg.message} (line ${msg.lineNum})`);
         }
 
+        const computeInfo = await computeModule.getCompilationInfo();
+        for (const msg of computeInfo.messages) {
+            console.error(`[compute shader] ${msg.type}: ${msg.message} (line ${msg.lineNum})`);
+        }
+
         this.curvePipeline = this.device.createRenderPipeline({
             layout: "auto",
+            primitive: { topology: "triangle-strip" },
             vertex: {
                 module,
                 entryPoint: "vs_curve",
-                buffers: [{
-                    arrayStride: 8,
-                    attributes: [{ shaderLocation: 0, offset: 0, format: "float32x2" }]
-                }]
             },
             fragment: {
                 module,
@@ -250,14 +256,23 @@ export class Renderer {
             }
         });
 
+        this.curveComputePipeline = this.device.createComputePipeline({
+            layout: "auto",
+            compute: {
+                module: computeModule,
+                entryPoint: "cs_curve"
+            }
+        });
+
 
     }
 
     public addCurve(curve: ParametricCurve) {
         const buffer = this.device.createBuffer({
-            size: 1000 * 2 * 4, // 1000 positions * 2 floats * 4 bytes
+            size: 5000 * 2 * 4, // 5000 positions * 2 floats * 4 bytes
             usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
         });
+
         this.curveBuffers.set(curve, buffer);
 
         const curveUniformBuf = this.device.createBuffer({
@@ -266,20 +281,30 @@ export class Renderer {
         });
 
         const outputBuffer = this.device.createBuffer({
-            size: 1000 * 16 * 2 * 4,
+            size: 5000 * 15 * 2 * 8,
             usage: GPUBufferUsage.STORAGE
         });
+
+        const computeBindGroup = this.device.createBindGroup({
+            layout: this.curveComputePipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: { buffer: outputBuffer } },
+                { binding: 1, resource: { buffer: buffer } },
+                { binding: 2, resource: { buffer: curveUniformBuf } },
+            ]
+        })
 
         const bindGroup = this.device.createBindGroup({
             layout: this.curvePipeline.getBindGroupLayout(0),
             entries: [
-                { binding: 0, resource: { buffer: buffer } },
+                { binding: 0, resource: { buffer: outputBuffer } },
                 { binding: 1, resource: { buffer: this.uniformBuf } },
                 { binding: 2, resource: { buffer: curveUniformBuf } },
-                { binding: 3, resource: { buffer: outputBuffer } },
             ]
         });
 
+
+        this.computeBindGroups.set(curve, computeBindGroup);
         this.curveBindGroups.set(curve, bindGroup);
         this.curveUniformBuffers.set(curve, curveUniformBuf);
         this.curveOutputBuffers.set(curve, outputBuffer);
@@ -349,18 +374,48 @@ export class Renderer {
 
     private drawCurves(encoder: GPUCommandEncoder, textureView: GPUTextureView, curves: ParametricCurve[], t: number) {
         const counts: Map<ParametricCurve, number> = new Map();
+        let count = 0;
         for (const curve of curves) {
             curve.step(t);
             const ev = curve.evaluate(t);
+
             counts.set(curve, ev.count);
+            count = ev.count;
+            const oldest = ev.count < ev.length ? 0 : ev.head;
+
             const flat = new Float32Array(ev.history.flatMap(p => [p.x, p.y]));
             this.device.queue.writeBuffer(this.curveBuffers.get(curve)!, 0, flat);
+            const buffer = new ArrayBuffer(32)
+            const floats = new Float32Array(buffer, 0, 5)
+            const ints = new Uint32Array(buffer, 20, 3)
+
+            floats[0] = ev.color.r;
+            floats[1] = ev.color.g;
+            floats[2] = ev.color.b;
+            floats[3] = ev.color.a;
+            floats[4] = ev.radius;
+
+            ints[0] = ev.count;
+            ints[1] = oldest;
+            ints[2] = ev.length;
+
             this.device.queue.writeBuffer(
                 this.curveUniformBuffers.get(curve)!, 0,
-                new Float32Array([ev.color.r, ev.color.g, ev.color.b, ev.color.a, ev.radius])
+                buffer
             );
         }
 
+        const computePass = encoder.beginComputePass();
+        computePass.setPipeline(this.curveComputePipeline);
+
+        for (const curve of curves) {
+            const bindGroup = this.computeBindGroups.get(curve);
+            computePass.setBindGroup(0, bindGroup);
+            if (count > 3)
+                computePass.dispatchWorkgroups(count - 3);
+        }
+
+        computePass.end();
 
         const pass = encoder.beginRenderPass({
             colorAttachments: [{
@@ -372,12 +427,12 @@ export class Renderer {
         });
 
         pass.setPipeline(this.curvePipeline);
-        pass.setVertexBuffer(0, this.vertexBuffer);
 
         for (const curve of curves) {
             const bindGroup = this.curveBindGroups.get(curve);
             pass.setBindGroup(0, bindGroup);
-            pass.draw(6, counts.get(curve));
+            if (count > 3)
+                pass.draw(30 * (count - 3)); // 30 positions per segment, length - 3 segments in total
         }
 
         pass.end();
