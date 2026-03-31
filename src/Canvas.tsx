@@ -409,8 +409,14 @@ export default function Canvas() {
 
                 <For each={circleEntries()}>
                     {(entry) => (
-
-                        <div>
+                        <div
+                        style={{
+                            background: "rgba(255,255,255,0.03)",
+                            border: "1px solid rgba(255,255,255,0.07)",
+                            "border-radius": "8px",
+                            padding: "12px",
+                            "margin-bottom": "8px",
+                        }}>
                             <div style={{ display: "flex", "justify-content": "space-between", "align-items": "center", "margin-bottom": "10px" }}>
                                 <div style={{ display: "flex", "align-items": "center", gap: "7px" }}>
                                     <div style={{ width: "8px", height: "8px", "border-radius": "50%", background: entry.color, "flex-shrink": "0" }} />
