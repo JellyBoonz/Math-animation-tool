@@ -6,6 +6,7 @@ import { ParametricCurve } from "./ParametricCurve";
 const SPACING = 1.0;
 const PANEL_W = 280;
 const CURVE_COLORS = ["#60a5fa", "#f472b6", "#34d399", "#fbbf24", "#a78bfa", "#f87171", "#38bdf8", "#fb923c"];
+const CIRCLE_COLORS = CURVE_COLORS;
 
 type CurveEntry = {
     id: number;
@@ -15,7 +16,14 @@ type CurveEntry = {
     color: string;
 };
 
+type CircleEntry = {
+    id: number;
+    circle: Circle;
+    color: string;
+};
+
 let nextCurveId = 0;
+let nextCircleId = 0;
 
 export default function Canvas() {
     let canvas!: HTMLCanvasElement;
@@ -36,8 +44,7 @@ export default function Canvas() {
     const [startTime, setStartTime] = createSignal(0);
     const [panelOpen, setPanelOpen] = createSignal(true);
     const [curveEntries, setCurveEntries] = createSignal<CurveEntry[]>([]);
-    const [selectedCircle, setSelectedCircle] = createSignal<Circle | null>(null);
-    const [selectedColor, setSelectedColor] = createSignal("#3b82f6");
+    const [circleEntries, setCircleEntries] = createSignal<CircleEntry[]>([]);
 
     const curveInputs = new Map<number, { x: string; y: string }>();
     let centerXVal = "0";
@@ -71,11 +78,32 @@ export default function Canvas() {
     }
 
     function removeCurve(id: number) {
+        nextCurveId--;
         const entry = curveEntries().find(e => e.id === id);
         if (!entry) return;
         gpuCurves = gpuCurves.filter(c => c !== entry.curve);
         curveInputs.delete(id);
         setCurveEntries(prev => prev.filter(e => e.id !== id));
+    }
+
+    function addCircle() {
+        const id = nextCircleId++;
+        const colorHex = CIRCLE_COLORS[id % CIRCLE_COLORS.length];
+        const c = new Circle();
+        c.setColor(hexToColor(colorHex));
+        circles.push(c);
+        setCircleEntries(prev => [...prev, {id, circle: c, color: colorHex}]);
+    }
+
+    function removeCircle(id: number) {
+        nextCircleId--;
+        const entry = circleEntries().find(e => e.id === id);
+        if (!entry) {
+            console.log("Circle not found");
+            return;
+        }
+        circles = circles.filter(c => c !== entry.circle);
+        setCircleEntries(prev => prev.filter(e => e.id !== id));
     }
 
     function applyCurveExpr(id: number) {
@@ -376,63 +404,73 @@ export default function Canvas() {
                 <div style={sectionLabel}>Circles</div>
                 <button
                     style={{ ...btn("transparent", "#64748b"), padding: "7px 12px", width: "100%", "margin-bottom": "10px", border: "1px dashed rgba(255,255,255,0.1)" }}
-                    onClick={() => {
-                        const c = new Circle();
-                        circles.push(c);
-                        setSelectedCircle(c);
-                        setSelectedColor("#3b82f6");
-                    }}
+                    onClick={() => { addCircle() }}
                 >+ Add Circle</button>
 
-                <Show when={selectedCircle() !== null}>
-                    <div style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.07)", "border-radius": "8px", padding: "12px", display: "flex", "flex-direction": "column", gap: "8px" }}>
+                <For each={circleEntries()}>
+                    {(entry) => (
+
                         <div>
-                            <div style={fieldLabel}>Center X</div>
-                            <input style={darkInput} placeholder="0"
-                                onKeyDown={e => {
-                                    if (e.key === "Enter") {
-                                        centerXVal = e.currentTarget.value;
-                                        try { selectedCircle()!.setCenter(centerXVal, centerYVal); } catch {}
-                                    }
-                                }}
-                            />
+                            <div style={{ display: "flex", "justify-content": "space-between", "align-items": "center", "margin-bottom": "10px" }}>
+                                <div style={{ display: "flex", "align-items": "center", gap: "7px" }}>
+                                    <div style={{ width: "8px", height: "8px", "border-radius": "50%", background: entry.color, "flex-shrink": "0" }} />
+                                    <span style={{ "font-weight": "600", "font-size": "12px", color: "#cbd5e1" }}>Circle {entry.id + 1}</span>
+                                </div>
+                                <button
+                                    style={{ ...btn("rgba(239,68,68,0.12)", "#f87171"), padding: "2px 7px", "font-size": "11px" }}
+                                    onClick={() => removeCircle(entry.id)}
+                                >✕</button>
+                            </div>
+                            <div style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.07)", "border-radius": "8px", padding: "12px", display: "flex", "flex-direction": "column", gap: "8px" }}>
+                                <div>
+                                    <div style={fieldLabel}>Center X</div>
+                                    <input style={darkInput} placeholder="0"
+                                        onKeyDown={e => {
+                                            if (e.key === "Enter") {
+                                                centerXVal = e.currentTarget.value;
+                                                try { entry.circle.setCenter(centerXVal, centerYVal); } catch {}
+                                            }
+                                        }}
+                                    />
+                                </div>
+                                <div>
+                                    <div style={fieldLabel}>Center Y</div>
+                                    <input style={darkInput} placeholder="0"
+                                        onKeyDown={e => {
+                                            if (e.key === "Enter") {
+                                                centerYVal = e.currentTarget.value;
+                                                try { entry.circle.setCenter(centerXVal, centerYVal); } catch {}
+                                            }
+                                        }}
+                                    />
+                                </div>
+                                <div>
+                                    <div style={fieldLabel}>Radius</div>
+                                    <input style={darkInput} placeholder="1"
+                                        onKeyDown={e => {
+                                            if (e.key === "Enter") {
+                                                try { entry.circle.setRadius(e.currentTarget.value); } catch {}
+                                            }
+                                        }}
+                                    />
+                                </div>
+                                <div>
+                                    <div style={fieldLabel}>Color</div>
+                                    <input
+                                        type="color"
+                                        value={entry.color}
+                                        style={{ width: "100%", height: "28px", border: "1px solid rgba(255,255,255,0.1)", "border-radius": "6px", cursor: "pointer", padding: "2px", background: "transparent" }}
+                                        onInput={e => {
+                                            const hex = e.currentTarget.value;
+                                            entry.circle.setColor(hexToColor(hex));
+                                            setCircleEntries(prev => prev.map(en => en.id === entry.id ? { ...en, color: hex } : en));
+                                        }}
+                                    />
+                                </div>
+                            </div>
                         </div>
-                        <div>
-                            <div style={fieldLabel}>Center Y</div>
-                            <input style={darkInput} placeholder="0"
-                                onKeyDown={e => {
-                                    if (e.key === "Enter") {
-                                        centerYVal = e.currentTarget.value;
-                                        try { selectedCircle()!.setCenter(centerXVal, centerYVal); } catch {}
-                                    }
-                                }}
-                            />
-                        </div>
-                        <div>
-                            <div style={fieldLabel}>Radius</div>
-                            <input style={darkInput} placeholder="1"
-                                onKeyDown={e => {
-                                    if (e.key === "Enter") {
-                                        try { selectedCircle()!.setRadius(e.currentTarget.value); } catch {}
-                                    }
-                                }}
-                            />
-                        </div>
-                        <div>
-                            <div style={fieldLabel}>Color</div>
-                            <input
-                                type="color"
-                                value={selectedColor()}
-                                style={{ width: "100%", height: "28px", border: "1px solid rgba(255,255,255,0.1)", "border-radius": "6px", cursor: "pointer", padding: "2px", background: "transparent" }}
-                                onInput={e => {
-                                    const hex = e.currentTarget.value;
-                                    setSelectedColor(hex);
-                                    selectedCircle()!.setColor(hexToColor(hex));
-                                }}
-                            />
-                        </div>
-                    </div>
-                </Show>
+                    )}
+                </For>
             </div>
         </div>
     );

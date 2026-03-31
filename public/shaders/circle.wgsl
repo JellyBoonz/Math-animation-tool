@@ -46,7 +46,7 @@ fn fs_circle(in: VertexOut) -> @location(0) vec4<f32>  {
     if(length(in.uv) < 1.0) {
         let color = circles[in.id].color.xyz;
 
-        let bandwidth = 0.1;
+        let bandwidth = 0.008;
         let min = 1 - bandwidth / uniforms.zoom;
         let max = 1.0;
         return vec4(color, 1 - smoothstep(min, max, length(in.uv)));
