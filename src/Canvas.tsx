@@ -2,6 +2,7 @@ import { createSignal, onMount, For, Show } from "solid-js";
 import { Renderer } from "./renderer/Renderer";
 import { Circle } from "./Circle";
 import { ParametricCurve } from "./ParametricCurve";
+import { Vector } from "./Vector";
 
 const SPACING = 1.0;
 const PANEL_W = 280;
@@ -22,8 +23,15 @@ type CircleEntry = {
     color: string;
 };
 
+type VectorEntry = {
+    id: number;
+    vector: Vector;
+    color: string;
+};
+
 let nextCurveId = 0;
 let nextCircleId = 0;
+let nextVectorId = 0;
 
 export default function Canvas() {
     let canvas!: HTMLCanvasElement;
@@ -32,6 +40,7 @@ export default function Canvas() {
     let t = 0;
     let gpuCurves: ParametricCurve[] = [];
     let circles: Circle[] = [];
+    let vectors: Vector[] = [];
 
     const W = window.innerWidth;
     const H = window.innerHeight;
@@ -45,8 +54,10 @@ export default function Canvas() {
     const [panelOpen, setPanelOpen] = createSignal(true);
     const [curveEntries, setCurveEntries] = createSignal<CurveEntry[]>([]);
     const [circleEntries, setCircleEntries] = createSignal<CircleEntry[]>([]);
+    const [vectorEntries, setVectorEntries] = createSignal<VectorEntry[]>([]);
 
     const curveInputs = new Map<number, { x: string; y: string }>();
+    const vectorInputs = new Map<number, { ox: string; oy: string; tx: string; ty: string }>();
     let centerXVal = "0";
     let centerYVal = "0";
     let isDragging = false;
@@ -104,6 +115,35 @@ export default function Canvas() {
         }
         circles = circles.filter(c => c !== entry.circle);
         setCircleEntries(prev => prev.filter(e => e.id !== id));
+    }
+
+    function addVector() {
+        const id = nextVectorId++;
+        const colorHex = CURVE_COLORS[id % CURVE_COLORS.length];
+        const v = new Vector();
+        v.setColor(hexToColor(colorHex));
+        vectors.push(v);
+        vectorInputs.set(id, { ox: "0", oy: "0", tx: "1", ty: "1" });
+        setVectorEntries(prev => [...prev, { id, vector: v, color: colorHex }]);
+    }
+
+    function removeVector(id: number) {
+        nextVectorId--;
+        const entry = vectorEntries().find(e => e.id === id);
+        if (!entry) return;
+        vectors = vectors.filter(v => v !== entry.vector);
+        vectorInputs.delete(id);
+        setVectorEntries(prev => prev.filter(e => e.id !== id));
+    }
+
+    function applyVectorExpr(id: number) {
+        const entry = vectorEntries().find(e => e.id === id);
+        const inputs = vectorInputs.get(id);
+        if (!entry || !inputs) return;
+        try {
+            entry.vector.setOrigin(inputs.ox, inputs.oy);
+            entry.vector.setDirection(inputs.tx, inputs.ty);
+        } catch {}
     }
 
     function applyCurveExpr(id: number) {
@@ -199,7 +239,7 @@ export default function Canvas() {
             "0.6 * cos(t) + 0.3 * cos(7 * t / 3)",
             "0.6 * sin(t) - 0.3 * sin(7 * t / 3)"
         );
-
+        
         const ctx = overlay.getContext("2d")!;
         let exponent = 0;
         let currentSpacing = SPACING;
@@ -211,7 +251,7 @@ export default function Canvas() {
             ({ currentSpacing, i: seqIdx, exponent } = adjustGridSpacing(currentSpacing, seqIdx, exponent, sequence));
             labelGridLines(ctx, currentSpacing);
             if (playing()) t = (performance.now() - startTime()) / 1000;
-            renderer.frame(panX(), panY(), zoom(), currentSpacing, circles, [], gpuCurves, t);
+            renderer.frame(panX(), panY(), zoom(), currentSpacing, circles, [], gpuCurves, vectors, t);
             requestAnimationFrame(loop);
         }
         requestAnimationFrame(loop);
@@ -470,6 +510,81 @@ export default function Canvas() {
                                             const hex = e.currentTarget.value;
                                             entry.circle.setColor(hexToColor(hex));
                                             setCircleEntries(prev => prev.map(en => en.id === entry.id ? { ...en, color: hex } : en));
+                                        }}
+                                    />
+                                </div>
+                            </div>
+                        </div>
+                    )}
+                </For>
+
+                <div style={{ "border-top": "1px solid rgba(255,255,255,0.06)", margin: "16px 0" }} />
+
+                {/* Vectors */}
+                <div style={sectionLabel}>Vectors</div>
+                <button
+                    style={{ ...btn("transparent", "#64748b"), padding: "7px 12px", width: "100%", "margin-bottom": "10px", border: "1px dashed rgba(255,255,255,0.1)" }}
+                    onClick={() => addVector()}
+                >+ Add Vector</button>
+
+                <For each={vectorEntries()}>
+                    {(entry) => (
+                        <div style={{
+                            background: "rgba(255,255,255,0.03)",
+                            border: "1px solid rgba(255,255,255,0.07)",
+                            "border-radius": "8px",
+                            padding: "12px",
+                            "margin-bottom": "8px",
+                        }}>
+                            <div style={{ display: "flex", "justify-content": "space-between", "align-items": "center", "margin-bottom": "10px" }}>
+                                <div style={{ display: "flex", "align-items": "center", gap: "7px" }}>
+                                    <div style={{ width: "8px", height: "8px", "border-radius": "50%", background: entry.color, "flex-shrink": "0" }} />
+                                    <span style={{ "font-weight": "600", "font-size": "12px", color: "#cbd5e1" }}>Vector {entry.id + 1}</span>
+                                </div>
+                                <button
+                                    style={{ ...btn("rgba(239,68,68,0.12)", "#f87171"), padding: "2px 7px", "font-size": "11px" }}
+                                    onClick={() => removeVector(entry.id)}
+                                >✕</button>
+                            </div>
+                            <div style={{ display: "flex", "flex-direction": "column", gap: "8px" }}>
+                                <div>
+                                    <div style={fieldLabel}>Origin X</div>
+                                    <input style={darkInput} value="0"
+                                        onInput={e => { vectorInputs.get(entry.id)!.ox = e.currentTarget.value; }}
+                                        onKeyDown={e => { if (e.key === "Enter") applyVectorExpr(entry.id); }}
+                                    />
+                                </div>
+                                <div>
+                                    <div style={fieldLabel}>Origin Y</div>
+                                    <input style={darkInput} value="0"
+                                        onInput={e => { vectorInputs.get(entry.id)!.oy = e.currentTarget.value; }}
+                                        onKeyDown={e => { if (e.key === "Enter") applyVectorExpr(entry.id); }}
+                                    />
+                                </div>
+                                <div>
+                                    <div style={fieldLabel}>Tip X</div>
+                                    <input style={darkInput} value="1"
+                                        onInput={e => { vectorInputs.get(entry.id)!.tx = e.currentTarget.value; }}
+                                        onKeyDown={e => { if (e.key === "Enter") applyVectorExpr(entry.id); }}
+                                    />
+                                </div>
+                                <div>
+                                    <div style={fieldLabel}>Tip Y</div>
+                                    <input style={darkInput} value="1"
+                                        onInput={e => { vectorInputs.get(entry.id)!.ty = e.currentTarget.value; }}
+                                        onKeyDown={e => { if (e.key === "Enter") applyVectorExpr(entry.id); }}
+                                    />
+                                </div>
+                                <div>
+                                    <div style={fieldLabel}>Color</div>
+                                    <input
+                                        type="color"
+                                        value={entry.color}
+                                        style={{ width: "100%", height: "28px", border: "1px solid rgba(255,255,255,0.1)", "border-radius": "6px", cursor: "pointer", padding: "2px", background: "transparent" }}
+                                        onInput={e => {
+                                            const hex = e.currentTarget.value;
+                                            entry.vector.setColor(hexToColor(hex));
+                                            setVectorEntries(prev => prev.map(en => en.id === entry.id ? { ...en, color: hex } : en));
                                         }}
                                     />
                                 </div>

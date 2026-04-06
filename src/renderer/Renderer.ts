@@ -1,6 +1,7 @@
 import { Circle } from "../Circle";
 import { Point } from "../Point";
 import { ParametricCurve } from "../ParametricCurve";
+import { Vector } from "../Vector";
 
 export class Renderer {
 
@@ -12,12 +13,16 @@ export class Renderer {
     private circlePipeline!: GPURenderPipeline;
     private pointPipeline!: GPURenderPipeline;
     private curvePipeline!: GPURenderPipeline;
+    private vectorBodyPipeline!: GPURenderPipeline;
+    private vectorHeadPipeline!: GPURenderPipeline;
 
     private curveComputePipeline!: GPUComputePipeline;
 
     private circleBuffer!: GPUBuffer;
     private pointBuffer!: GPUBuffer;
     private vertexBuffer!: GPUBuffer;
+    private vectorBuffer!: GPUBuffer;
+    private vectorHeadVertexBuffer!: GPUBuffer;
     private uniformBuf!: GPUBuffer;
     private curveUniformBuffers: Map<ParametricCurve, GPUBuffer> = new Map();
     private curveBuffers: Map<ParametricCurve, GPUBuffer> = new Map();
@@ -26,6 +31,8 @@ export class Renderer {
     private bindGroup!: GPUBindGroup;
     private circleBingGroup!: GPUBindGroup;
     private pointBindGroup!: GPUBindGroup;
+    private vectorBindGroup!: GPUBindGroup;
+    private vectorHeadBindGroup!: GPUBindGroup;
     private curveBindGroups: Map<ParametricCurve, GPUBindGroup> = new Map();
     private computeBindGroups: Map<ParametricCurve, GPUBindGroup> = new Map();
 
@@ -84,6 +91,8 @@ export class Renderer {
         await this.initCircles(canvasFormat);
         await this.initPoints(canvasFormat);
         await this.initCurves(canvasFormat);
+        await this.initVectorBody(canvasFormat);
+        await this.initVectorHead(canvasFormat);
     }
 
     private async initGrid(canvasFormat: GPUTextureFormat) {
@@ -217,6 +226,103 @@ export class Renderer {
         });
 
 
+    }
+
+    private async initVectorBody(canvasFormat: GPUTextureFormat) {
+        const shaderSource = await fetch("/shaders/vector_body.wgsl").then(r => r.text());
+        const module = this.device.createShaderModule({ code: shaderSource });
+
+        const info = await module.getCompilationInfo();
+        for (const msg of info.messages) {
+            console.error(`[shader] ${msg.type}: ${msg.message} (line ${msg.lineNum})`);
+        }
+
+        this.vectorBuffer = this.device.createBuffer({
+            size: 360,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
+        })
+
+        this.vectorBodyPipeline = this.device.createRenderPipeline({
+            layout: "auto",
+            vertex: {
+                module,
+                entryPoint: "vs_vecBody",
+                buffers: [{
+                    arrayStride: 8,
+                    attributes: [{ shaderLocation: 0, offset: 0, format: "float32x2" }]
+                }]
+            },
+            fragment: {
+                module,
+                entryPoint: "fs_vecBody",
+                targets: [{
+                    format: canvasFormat,
+                    blend: {
+                        color: { srcFactor: "src-alpha", dstFactor: "one-minus-src-alpha", operation: "add" },
+                        alpha: { srcFactor: "one", dstFactor: "one-minus-src-alpha", operation: "add" }
+                    }
+                }]
+            }
+        });
+
+        this.vectorBindGroup = this.device.createBindGroup({
+            layout: this.vectorBodyPipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: { buffer: this.vectorBuffer } },
+                { binding: 1, resource: { buffer: this.uniformBuf } },
+            ]
+        })
+    }
+
+    private async initVectorHead(canvasFormat: GPUTextureFormat) {
+        const shaderSource = await fetch("/shaders/vector_head.wgsl").then(r => r.text());
+        const module = this.device.createShaderModule({ code: shaderSource });
+
+        const info = await module.getCompilationInfo();
+        for (const msg of info.messages) {
+            console.error(`[shader] ${msg.type}: ${msg.message} (line ${msg.lineNum})`);
+        }
+
+        // Single triangle arrowhead pointing in +y local space
+        const vertices = new Float32Array([
+            -1, -1,   1, -1,   0, 1,
+        ]);
+        this.vectorHeadVertexBuffer = this.device.createBuffer({
+            size: vertices.byteLength,
+            usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+        });
+        this.device.queue.writeBuffer(this.vectorHeadVertexBuffer, 0, vertices);
+
+        this.vectorHeadPipeline = this.device.createRenderPipeline({
+            layout: "auto",
+            vertex: {
+                module,
+                entryPoint: "vs_vecHead",
+                buffers: [{
+                    arrayStride: 8,
+                    attributes: [{ shaderLocation: 0, offset: 0, format: "float32x2" }]
+                }]
+            },
+            fragment: {
+                module,
+                entryPoint: "fs_vecHead",
+                targets: [{
+                    format: canvasFormat,
+                    blend: {
+                        color: { srcFactor: "src-alpha", dstFactor: "one-minus-src-alpha", operation: "add" },
+                        alpha: { srcFactor: "one", dstFactor: "one-minus-src-alpha", operation: "add" }
+                    }
+                }]
+            }
+        });
+
+        this.vectorHeadBindGroup = this.device.createBindGroup({
+            layout: this.vectorHeadPipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: { buffer: this.vectorBuffer } },
+                { binding: 1, resource: { buffer: this.uniformBuf } },
+            ]
+        });
     }
 
     private async initCurves(canvasFormat: GPUTextureFormat) {
@@ -438,7 +544,36 @@ export class Renderer {
         pass.end();
     }
 
-    public frame(panX: number, panY: number, zoom: number, currentSpacing: number, circles: Circle[], points: Point[], curves: ParametricCurve[], t: number) {
+    private drawVectors(encoder: GPUCommandEncoder, textureView: GPUTextureView, vectors: Vector[], t: number) {
+        const data: number[] = [];
+        for (const v of vectors) {
+            const ev = v.evaluate(t);
+            data.push(ev.originX, ev.originY, ev.directionX, ev.directionY, ev.color.r, ev.color.g, ev.color.b, ev.color.a, ev.len);
+        }
+        this.device.queue.writeBuffer(this.vectorBuffer, 0, new Float32Array(data));
+
+        const pass = encoder.beginRenderPass({
+            colorAttachments: [{
+                view: textureView,
+                clearValue: { r: 0.8, g: 0.87, b: 0.98, a: 1 },
+                loadOp: "load",
+                storeOp: "store"
+            }]
+        });
+        pass.setPipeline(this.vectorBodyPipeline);
+        pass.setVertexBuffer(0, this.vertexBuffer);
+        pass.setBindGroup(0, this.vectorBindGroup);
+        pass.draw(6, vectors.length);
+
+        pass.setPipeline(this.vectorHeadPipeline);
+        pass.setVertexBuffer(0, this.vectorHeadVertexBuffer);
+        pass.setBindGroup(0, this.vectorHeadBindGroup);
+        pass.draw(3, vectors.length);
+        
+        pass.end();
+    }
+
+    public frame(panX: number, panY: number, zoom: number, currentSpacing: number, circles: Circle[], points: Point[], curves: ParametricCurve[], vectors: Vector[], t: number) {
         const textureView = this.context.getCurrentTexture().createView();
         this.device.queue.writeBuffer(
             this.uniformBuf, 0,
@@ -452,6 +587,7 @@ export class Renderer {
         this.drawCircles(encoder, textureView, circles, t);
         this.drawPoints(encoder, textureView, points, t);
         this.drawCurves(encoder, textureView, curves, t);
+        this.drawVectors(encoder, textureView, vectors, t);
         this.device.queue.submit([encoder.finish()]);
 
         this.device.popErrorScope().then(error => {
