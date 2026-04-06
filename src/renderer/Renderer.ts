@@ -283,9 +283,9 @@ export class Renderer {
             console.error(`[shader] ${msg.type}: ${msg.message} (line ${msg.lineNum})`);
         }
 
-        // Single triangle arrowhead pointing in +y local space
+        // Single triangle arrowhead pointing to origin in local space [-1, 1]
         const vertices = new Float32Array([
-            -1, -1,   1, -1,   0, 1,
+            -1, -1, 1, -1, 0, 0
         ]);
         this.vectorHeadVertexBuffer = this.device.createBuffer({
             size: vertices.byteLength,
@@ -569,7 +569,7 @@ export class Renderer {
         pass.setVertexBuffer(0, this.vectorHeadVertexBuffer);
         pass.setBindGroup(0, this.vectorHeadBindGroup);
         pass.draw(3, vectors.length);
-        
+
         pass.end();
     }
 

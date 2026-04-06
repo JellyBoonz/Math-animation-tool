@@ -34,10 +34,10 @@ export class Vector {
     }
 
     setDirection(x: string, y: string) {
-        const dx = `(${x}) - (${this.oXStr})`;
-        const dy = `(${y}) - (${this.oYStr})`;
-        this.dirX = compileExpr(dx);
-        this.dirY = compileExpr(dy);
+        // const dx = `(${x}) - (${this.oXStr})`;
+        // const dy = `(${y}) - (${this.oYStr})`;
+        this.dirX = compileExpr(x);
+        this.dirY = compileExpr(y);
     }
 
     setColor(c: { r: number, g: number, b: number, a: number }) {

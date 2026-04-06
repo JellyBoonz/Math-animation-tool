@@ -562,14 +562,14 @@ export default function Canvas() {
                                     />
                                 </div>
                                 <div>
-                                    <div style={fieldLabel}>Tip X</div>
+                                    <div style={fieldLabel}>Direction X</div>
                                     <input style={darkInput} value="1"
                                         onInput={e => { vectorInputs.get(entry.id)!.tx = e.currentTarget.value; }}
                                         onKeyDown={e => { if (e.key === "Enter") applyVectorExpr(entry.id); }}
                                     />
                                 </div>
                                 <div>
-                                    <div style={fieldLabel}>Tip Y</div>
+                                    <div style={fieldLabel}>Direction Y</div>
                                     <input style={darkInput} value="1"
                                         onInput={e => { vectorInputs.get(entry.id)!.ty = e.currentTarget.value; }}
                                         onKeyDown={e => { if (e.key === "Enter") applyVectorExpr(entry.id); }}
