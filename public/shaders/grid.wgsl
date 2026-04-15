@@ -48,11 +48,11 @@ fn fs_grid(in: VertexOut) -> @location(0) vec4<f32> {
     var yRemainderQ = fract((worldY - nearestLineY) / quintileSpacing) * quintileSpacing;
     // Check if this pixel is near the X or Y axis (world origin lines)
     if (abs(worldX) < oLineThickness || abs(worldY) < oLineThickness) {
-        return vec4(0.5, 0.5, 0.5, 1.0);
+        return vec4(0.1, 0.1, 0.1, .7);
     }
     else if (xRemainder < mainLineThickness || xRemainder > spacing - mainLineThickness ||
     yRemainder < mainLineThickness || yRemainder > spacing - mainLineThickness) {
-       return vec4(0.4, 0.4, 0.4, .7); 
+       return vec4(0.1, 0.1, 0.1, .4); 
     }
     else if (xRemainderQ < lineThickness || xRemainderQ > quintileSpacing - lineThickness ||
         yRemainderQ < lineThickness || yRemainderQ > quintileSpacing - lineThickness) {
@@ -60,5 +60,5 @@ fn fs_grid(in: VertexOut) -> @location(0) vec4<f32> {
     }
 
 
-    return vec4(0.8, 0.87, 0.98, 1.0); // baby blue
+    return vec4(0.95, 0.95, 0.98, 1.0);
 }

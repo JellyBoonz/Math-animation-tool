@@ -25,7 +25,8 @@ fn vs_vecBody(@builtin(instance_index) i: u32, @location(0) pos: vec2<f32>) -> V
     let v = vectors[i];
     let aspect = uniforms.resolution.x / uniforms.resolution.y;
 
-    let angle = atan2(v.dir.y, v.dir.x);
+    const PI = 3.14159265358979323846;
+    let angle = atan2(v.dir.y, v.dir.x) - PI / 2;
     let cos_a = cos(angle);
     let sin_a = sin(angle);
 
@@ -35,8 +36,8 @@ fn vs_vecBody(@builtin(instance_index) i: u32, @location(0) pos: vec2<f32>) -> V
     );
 
     let rotate = mat2x2<f32>(
-        cos_a, -sin_a,
-        sin_a,  cos_a,
+        cos_a, sin_a,
+        -sin_a, cos_a,
     );
 
     let mid = v.origin + v.dir / 2.0;

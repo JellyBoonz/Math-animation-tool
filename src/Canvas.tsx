@@ -27,6 +27,10 @@ type VectorEntry = {
     id: number;
     vector: Vector;
     color: string;
+    ox: string;
+    oy: string;
+    dx: string;
+    dy: string;
 };
 
 let nextCurveId = 0;
@@ -55,6 +59,7 @@ export default function Canvas() {
     const [curveEntries, setCurveEntries] = createSignal<CurveEntry[]>([]);
     const [circleEntries, setCircleEntries] = createSignal<CircleEntry[]>([]);
     const [vectorEntries, setVectorEntries] = createSignal<VectorEntry[]>([]);
+    const [cursor, setCursor] = createSignal("default");
 
     const curveInputs = new Map<number, { x: string; y: string }>();
     const vectorInputs = new Map<number, { ox: string; oy: string; tx: string; ty: string }>();
@@ -63,6 +68,9 @@ export default function Canvas() {
     let isDragging = false;
     let lastMouseX = 0;
     let lastMouseY = 0;
+    let draggingVectorId: number | null = null;
+    let draggingHandle: 'origin' | 'tip' | null = null;
+    let latestSpacing = SPACING;
 
     function hexToColor(hex: string) {
         return {
@@ -124,7 +132,7 @@ export default function Canvas() {
         v.setColor(hexToColor(colorHex));
         vectors.push(v);
         vectorInputs.set(id, { ox: "0", oy: "0", tx: "1", ty: "1" });
-        setVectorEntries(prev => [...prev, { id, vector: v, color: colorHex }]);
+        setVectorEntries(prev => [...prev, { id, vector: v, color: colorHex, ox: "0", oy: "0", dx: "1", dy: "1" }]);
     }
 
     function removeVector(id: number) {
@@ -143,6 +151,9 @@ export default function Canvas() {
         try {
             entry.vector.setOrigin(inputs.ox, inputs.oy);
             entry.vector.setDirection(inputs.tx, inputs.ty);
+            setVectorEntries(prev => prev.map(e =>
+                e.id === id ? { ...e, ox: inputs.ox, oy: inputs.oy, dx: inputs.tx, dy: inputs.ty } : e
+            ));
         } catch {}
     }
 
@@ -159,12 +170,51 @@ export default function Canvas() {
     }
 
     function onMouseDown(e: MouseEvent) {
+        const hit = hitTestVectors(e.clientX, e.clientY);
+        if (hit) {
+            draggingVectorId = hit.id;
+            draggingHandle = hit.handle;
+            setCursor("grabbing");
+            return;
+        }
         isDragging = true;
         lastMouseX = e.clientX;
         lastMouseY = e.clientY;
     }
 
     function onMouseMove(e: MouseEvent) {
+        if (draggingVectorId !== null) {
+            const world = screenToWorld(e.clientX, e.clientY);
+            const snapped = snapToGrid(world.x, world.y);
+            const entry = vectorEntries().find(en => en.id === draggingVectorId);
+            if (!entry) return;
+            const ev = entry.vector.evaluate(t);
+
+            if (draggingHandle === 'tip') {
+                const newDx = (snapped.x - ev.originX).toFixed(3);
+                const newDy = (snapped.y - ev.originY).toFixed(3);
+                entry.vector.setDirection(newDx, newDy);
+                const inputs = vectorInputs.get(draggingVectorId!);
+                if (inputs) { inputs.tx = newDx; inputs.ty = newDy; }
+                setVectorEntries(prev => prev.map(en =>
+                    en.id === draggingVectorId ? { ...en, dx: newDx, dy: newDy } : en
+                ));
+            } else {
+                const newOx = snapped.x.toFixed(3);
+                const newOy = snapped.y.toFixed(3);
+                entry.vector.setOrigin(newOx, newOy);
+                const inputs = vectorInputs.get(draggingVectorId!);
+                if (inputs) { inputs.ox = newOx; inputs.oy = newOy; }
+                setVectorEntries(prev => prev.map(en =>
+                    en.id === draggingVectorId ? { ...en, ox: newOx, oy: newOy } : en
+                ));
+            }
+            return;
+        }
+
+        const hit = hitTestVectors(e.clientX, e.clientY);
+        setCursor(hit ? "grab" : "default");
+
         if (!isDragging) return;
         const dx = e.clientX - lastMouseX;
         const dy = e.clientY - lastMouseY;
@@ -175,11 +225,64 @@ export default function Canvas() {
         setPanY(p => p + dy * 2 / (z * H));
     }
 
-    function onMouseUp() { isDragging = false; }
+    function onMouseUp() {
+        draggingVectorId = null;
+        draggingHandle = null;
+        isDragging = false;
+        setCursor("default");
+    }
 
     function onWheel(e: WheelEvent) {
         e.preventDefault();
         setZoom(z => z * (e.deltaY < 0 ? 1.1 : 1 / 1.1));
+    }
+
+    function screenToWorld(sx: number, sy: number) {
+        const ndcX = (sx / W) * 2 - 1;
+        const ndcY = (sy / H) * 2 - 1;
+        return {
+            x: ndcX * ASPECT / zoom() + panX(),
+            y: panY() - ndcY / zoom(),
+        };
+    }
+
+    function worldToScreen(wx: number, wy: number) {
+        const ndcX = (wx - panX()) * zoom() / ASPECT;
+        const ndcY = (panY() - wy) * zoom();
+        return {
+            x: (ndcX + 1) * W / 2,
+            y: (ndcY + 1) * H / 2,
+        };
+    }
+
+    function snapToGrid(wx: number, wy: number) {
+        const SNAP_PX = 14;
+        const threshX = SNAP_PX * 2 * ASPECT / (W * zoom());
+        const threshY = SNAP_PX * 2 / (H * zoom());
+        const nearestX = Math.round(wx / latestSpacing) * latestSpacing;
+        const nearestY = Math.round(wy / latestSpacing) * latestSpacing;
+        return {
+            x: Math.abs(wx - nearestX) < threshX ? nearestX : wx,
+            y: Math.abs(wy - nearestY) < threshY ? nearestY : wy,
+        };
+    }
+
+    function hitTestVectors(sx: number, sy: number): { id: number; handle: 'origin' | 'tip' } | null {
+        const HIT_PX = 14;
+        for (const entry of vectorEntries()) {
+            const ev = entry.vector.evaluate(t);
+            const tipX = ev.originX + ev.directionX;
+            const tipY = ev.originY + ev.directionY;
+
+            const tip = worldToScreen(tipX, tipY);
+            if (Math.hypot(sx - tip.x, sy - tip.y) < HIT_PX)
+                return { id: entry.id, handle: 'tip' };
+
+            const origin = worldToScreen(ev.originX, ev.originY);
+            if (Math.hypot(sx - origin.x, sy - origin.y) < HIT_PX)
+                return { id: entry.id, handle: 'origin' };
+        }
+        return null;
     }
 
     function mod(i: number, n: number) { return ((i % n) + n) % n; }
@@ -249,6 +352,7 @@ export default function Canvas() {
         function loop() {
             ctx.clearRect(0, 0, W, H);
             ({ currentSpacing, i: seqIdx, exponent } = adjustGridSpacing(currentSpacing, seqIdx, exponent, sequence));
+            latestSpacing = currentSpacing;
             labelGridLines(ctx, currentSpacing);
             if (playing()) t = (performance.now() - startTime()) / 1000;
             renderer.frame(panX(), panY(), zoom(), currentSpacing, circles, [], gpuCurves, vectors, t);
@@ -305,7 +409,7 @@ export default function Canvas() {
                 ref={overlay}
                 width={W}
                 height={H}
-                style={{ position: "absolute", top: "0", left: "0", background: "transparent" }}
+                style={{ position: "absolute", top: "0", left: "0", background: "transparent", cursor: cursor() }}
                 onMouseDown={onMouseDown}
                 onMouseMove={onMouseMove}
                 onMouseUp={onMouseUp}
@@ -549,28 +653,28 @@ export default function Canvas() {
                             <div style={{ display: "flex", "flex-direction": "column", gap: "8px" }}>
                                 <div>
                                     <div style={fieldLabel}>Origin X</div>
-                                    <input style={darkInput} value="0"
+                                    <input style={darkInput} value={entry.ox}
                                         onInput={e => { vectorInputs.get(entry.id)!.ox = e.currentTarget.value; }}
                                         onKeyDown={e => { if (e.key === "Enter") applyVectorExpr(entry.id); }}
                                     />
                                 </div>
                                 <div>
                                     <div style={fieldLabel}>Origin Y</div>
-                                    <input style={darkInput} value="0"
+                                    <input style={darkInput} value={entry.oy}
                                         onInput={e => { vectorInputs.get(entry.id)!.oy = e.currentTarget.value; }}
                                         onKeyDown={e => { if (e.key === "Enter") applyVectorExpr(entry.id); }}
                                     />
                                 </div>
                                 <div>
                                     <div style={fieldLabel}>Direction X</div>
-                                    <input style={darkInput} value="1"
+                                    <input style={darkInput} value={entry.dx}
                                         onInput={e => { vectorInputs.get(entry.id)!.tx = e.currentTarget.value; }}
                                         onKeyDown={e => { if (e.key === "Enter") applyVectorExpr(entry.id); }}
                                     />
                                 </div>
                                 <div>
                                     <div style={fieldLabel}>Direction Y</div>
-                                    <input style={darkInput} value="1"
+                                    <input style={darkInput} value={entry.dy}
                                         onInput={e => { vectorInputs.get(entry.id)!.ty = e.currentTarget.value; }}
                                         onKeyDown={e => { if (e.key === "Enter") applyVectorExpr(entry.id); }}
                                     />
